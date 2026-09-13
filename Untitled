@@ -1,0 +1,21 @@
+book_topics
+----------------
+id
+book_id
+name
+slug
+position (integer) default 1
+
+
+book_topic_details (has many)
+----------------
+id
+book_topic_id
+content
+position (integer) default 1
+
+book_topic_ref_pages (has many)
+----------------
+id
+book_topic_id
+book_page_id

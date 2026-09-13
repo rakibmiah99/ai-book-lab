@@ -1,0 +1,14 @@
+
+---------- First Step ----------
+- read books table and book_pages table
+- in book_pages table `content` column hosse page er text content. r `image_url` hosse page tir full url jemon `https://cnd.domain.filename.extension`
+- now read book pages image by gpt luna model and ocr text and save in `ai_ocr_content` column for this make a ai agent for auto read and save when null ai_ocr_content column and from image_url.
+
+------------ Second Step ----------
+- now read book_pages  table and read `ai_ocr_content`, after read make book.
+- make serialize `book_topics` based on `ai_ocr_content`,
+- make topic details in `book_topics_details` table based on `book_topics` and `ai_ocr_content`
+- make book topic and details reference based on page reference in `book_pages` for verify content with original page content. mane topic ta kun page er ta kuno somossa hole kokhono ta verify korar jonno.
+- and find topic wise important notes and save in `book_topic_important_notes` table based on `book_topics` and `ai_ocr_content`. in punch_line column ekhane shei topic er social media share karo sathe sohoje tule dorar jonno suto sentense ja reader ke vavabe, kauke bolle sheti prosongsonio hobe, ja geni kotha.
+
+
