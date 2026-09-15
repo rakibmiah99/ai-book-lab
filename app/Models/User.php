@@ -7,6 +7,8 @@ use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
@@ -27,6 +29,24 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'is_admin' => 'boolean',
         ];
+    }
+
+    /**
+     * @return BelongsToMany<BookTopic, $this>
+     */
+    public function favoriteTopics(): BelongsToMany
+    {
+        return $this->belongsToMany(BookTopic::class, 'book_topic_favorites', 'user_id', 'book_topic_id')
+            ->withTimestamps();
+    }
+
+    /**
+     * @return HasMany<BookTopicFeedback, $this>
+     */
+    public function feedbacks(): HasMany
+    {
+        return $this->hasMany(BookTopicFeedback::class);
     }
 }
