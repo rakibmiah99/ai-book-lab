@@ -1,0 +1,31 @@
+Modify the existing Laravel Artisan command OrganizeBookTopics according to the following requirements.
+
+Goal
+
+The command should ONLY organize the OCR'd book pages into Topics and determine each Topic's page range/reference pages.
+
+It must NOT generate topic details/content and must NOT generate important notes using AI.
+
+The existing command is located in the uploaded code/file and currently does more than needed.
+
+Required behavior
+
+The command should work like this:
+
+Book
+ ↓
+OCR pages (`ai_ocr_content`)
+ ↓
+Check first 20 pages for the book's own Table of Contents
+ ↓
+If TOC exists:
+    Create Topics from TOC
+    Determine each Topic's start/end page
+    Create reference-page relationships
+ ↓
+If TOC does NOT exist:
+    Process OCR pages in chunks of 10
+    Ask AI only to identify Topics and their related page numbers
+    Create Topics
+    Create reference-page relationships
+ ↓
