@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Ai\Agents\BookPageOcrAgent;
+use App\Models\Book;
 use App\Models\BookPage;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
@@ -13,7 +14,9 @@ use Laravel\Ai\Files\Image;
 use Laravel\Ai\Responses\StructuredAgentResponse;
 use Throwable;
 
-#[Signature('app:ocr-book-pages')]
+#[Signature('app:ocr-book-pages
+    {book_id? : Only OCR pages belonging to this book id}'
+)]
 #[Description('Read pending book page images with the OCR agent and store the extracted text')]
 class OcrBookPages extends Command
 {
@@ -22,9 +25,19 @@ class OcrBookPages extends Command
      */
     public function handle(): int
     {
-        $pending = BookPage::whereNull('ai_ocr_content')
+        $bookId = $this->argument('book_id');
+
+        if ($bookId !== null && ! Book::whereKey($bookId)->exists()) {
+            $this->error("No book found with id={$bookId}");
+
+            return self::FAILURE;
+        }
+
+        $query = BookPage::whereNull('ai_ocr_content')
             ->whereNotNull('image_url')
-            ->count();
+            ->when($bookId !== null, fn ($query) => $query->where('book_id', $bookId));
+
+        $pending = (clone $query)->count();
 
         if ($pending === 0) {
             $this->info('No book pages pending OCR.');
@@ -34,14 +47,12 @@ class OcrBookPages extends Command
 
         $this->output->progressStart($pending);
 
-        BookPage::whereNull('ai_ocr_content')
-            ->whereNotNull('image_url')
-            ->chunkById(20, function ($pages) {
-                foreach ($pages as $page) {
-                    $this->ocrPage($page);
-                    $this->output->progressAdvance();
-                }
-            });
+        $query->chunkById(20, function ($pages) {
+            foreach ($pages as $page) {
+                $this->ocrPage($page);
+                $this->output->progressAdvance();
+            }
+        });
 
         $this->output->progressFinish();
 

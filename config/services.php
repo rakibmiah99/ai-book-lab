@@ -35,4 +35,9 @@ return [
         ],
     ],
 
+    'media_upload' => [
+        'base_url' => env('MEDIA_UPLOAD_BASE_URL', 'https://www.takebackbangladesh.com'),
+        'timeout' => env('MEDIA_UPLOAD_TIMEOUT', 30),
+    ],
+
 ];
