@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Ai\Agents\BookTopicDetailAgent;
 use App\Ai\Agents\BookTopicOrganizerAgent;
 use App\Models\Book;
 use App\Models\BookPage;
@@ -21,6 +22,13 @@ use Throwable;
 class OrganizeBookTopics extends Command
 {
     /**
+     * The number of consecutive book pages sent to the organizer agent per
+     * call, so the prompt stays well within the model's input token limit
+     * regardless of how long the book is.
+     */
+    protected const PAGES_PER_CHUNK = 10;
+
+    /**
      * Execute the console command.
      */
     public function handle(): int
@@ -31,12 +39,6 @@ class OrganizeBookTopics extends Command
             $this->error("Book [{$this->argument('book_id')}] not found.");
 
             return self::FAILURE;
-        }
-
-        if ($book->topics()->exists()) {
-            $this->info("Book [{$book->id}] has already been organized into topics.");
-
-            return self::SUCCESS;
         }
 
         $pages = $book->pages()
@@ -50,13 +52,41 @@ class OrganizeBookTopics extends Command
             return self::SUCCESS;
         }
 
-        try {
-            /** @var StructuredAgentResponse $response */
-            $response = (new BookTopicOrganizerAgent)->prompt(
-                $this->transcriptPrompt($pages),
-            );
+        $organizedThroughPage = $book->topics_organized_through_page ?? 0;
 
-            $this->storeTopics($book, $pages, $response['topics']);
+        $remainingPages = $pages->where('page_number', '>', $organizedThroughPage)->values();
+
+        if ($remainingPages->isEmpty()) {
+            $this->info("Book [{$book->id}] has already been organized into topics.");
+
+            return self::SUCCESS;
+        }
+
+        $pagesByNumber = $pages->keyBy('page_number');
+        $position = ((int) $book->topics()->max('position')) + 1;
+
+        try {
+            foreach ($remainingPages->chunk(self::PAGES_PER_CHUNK) as $chunk) {
+                /** @var StructuredAgentResponse $response */
+                $response = (new BookTopicOrganizerAgent)->prompt(
+                    $this->transcriptPrompt($chunk),
+                );
+
+                $chunkTopics = [];
+
+                foreach ($response['topics'] as $topicStructure) {
+                    $chunkTopics[] = $this->detailTopic($pagesByNumber, [
+                        ...$topicStructure,
+                        'position' => $position++,
+                    ]);
+                }
+
+                $lastPageNumber = $chunk->max('page_number');
+
+                $this->storeChunk($book, $pagesByNumber, $chunkTopics, $lastPageNumber);
+
+                $this->info("Book [{$book->id}]: organized through page {$lastPageNumber} — found ".count($chunkTopics).' topic(s) in this chunk.');
+            }
         } catch (Throwable $e) {
             $this->error("Failed to organize topics for book [{$book->id}]: {$e->getMessage()}");
             $this->logProviderError($book, $e);
@@ -88,16 +118,73 @@ class OrganizeBookTopics extends Command
     }
 
     /**
-     * Persist the agent's structured topics for the given book.
+     * Fill in a single topic's full detail content and important notes by
+     * prompting the detail agent with only that topic's referenced pages.
+     *
+     * @param  Collection<int, BookPage>  $pagesByNumber
+     * @param  array{name: string, position: int, ref_page_numbers: array<int, int>}  $topic
+     * @return array{name: string, position: int, ref_page_numbers: array<int, int>, details: array<int, array{content: string, position: int}>, important_notes: array<int, array{note: string, punch_line: string}>}
+     */
+    protected function detailTopic(Collection $pagesByNumber, array $topic): array
+    {
+        $topicPages = collect($topic['ref_page_numbers'])
+            ->map(fn (int $pageNumber) => $pagesByNumber->get($pageNumber))
+            ->filter()
+            ->sortBy('page_number')
+            ->values();
+
+        if ($topicPages->isEmpty()) {
+            Log::channel('ai_provider')->warning('Topic has no matching pages to detail; skipping content generation.', [
+                'topic' => $topic['name'],
+                'ref_page_numbers' => $topic['ref_page_numbers'],
+            ]);
+
+            return [...$topic, 'details' => [], 'important_notes' => []];
+        }
+
+        /** @var StructuredAgentResponse $response */
+        $response = (new BookTopicDetailAgent)->prompt(
+            $this->topicTranscriptPrompt($topic['name'], $topicPages),
+        );
+
+        return [
+            ...$topic,
+            'details' => $response['details'],
+            'important_notes' => $response['important_notes'],
+        ];
+    }
+
+    /**
+     * Build the transcript prompt for a single topic's detail agent call.
      *
      * @param  Collection<int, BookPage>  $pages
+     */
+    protected function topicTranscriptPrompt(string $topicName, Collection $pages): string
+    {
+        $transcript = $pages->map(
+            fn (BookPage $page) => "[Page {$page->page_number}]\n{$page->ai_ocr_content}"
+        )->implode("\n\n");
+
+        return <<<TEXT
+        Write the complete detail content for the topic "{$topicName}" using
+        only the following transcript pages.
+
+        {$transcript}
+        TEXT;
+    }
+
+    /**
+     * Persist one chunk's topics for the given book and advance the book's
+     * resume pointer to the chunk's last page, atomically. This lets a
+     * re-run of the command pick up from the next chunk instead of
+     * re-processing (and re-billing) pages that are already organized.
+     *
+     * @param  Collection<int, BookPage>  $pagesByNumber
      * @param  array<int, array{name: string, position: int, ref_page_numbers: array<int, int>, details: array<int, array{content: string, position: int}>, important_notes: array<int, array{note: string, punch_line: string}>}>  $topics
      */
-    protected function storeTopics(Book $book, Collection $pages, array $topics): void
+    protected function storeChunk(Book $book, Collection $pagesByNumber, array $topics, int $lastPageNumber): void
     {
-        $pagesByNumber = $pages->keyBy('page_number');
-
-        DB::transaction(function () use ($book, $pagesByNumber, $topics) {
+        DB::transaction(function () use ($book, $pagesByNumber, $topics, $lastPageNumber) {
             foreach ($topics as $topic) {
                 $bookTopic = $book->topics()->create([
                     'name' => $topic['name'],
@@ -121,6 +208,8 @@ class OrganizeBookTopics extends Command
                     }
                 }
             }
+
+            $book->update(['topics_organized_through_page' => $lastPageNumber]);
         });
     }
 

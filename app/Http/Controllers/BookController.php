@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Book;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
+use Illuminate\Pagination\LengthAwarePaginator;
 
 class BookController extends Controller
 {
@@ -35,23 +36,25 @@ class BookController extends Controller
             ->orderBy('page_number')
             ->firstOrFail();
 
-        $previousPage = $book->pages()
-            ->where('page_number', '<', $page->page_number)
-            ->orderByDesc('page_number')
-            ->first();
+        $totalPages = $book->pages()->count();
 
-        $nextPage = $book->pages()
-            ->where('page_number', '>', $page->page_number)
-            ->orderBy('page_number')
-            ->first();
+        $pagination = new LengthAwarePaginator(
+            items: [],
+            total: $totalPages,
+            perPage: 1,
+            currentPage: $page->page_number,
+            options: [
+                'path' => route('books.show', $book),
+                'pageName' => 'page',
+            ],
+        );
 
         return view('books.show', [
             'book' => $book,
             'topics' => $book->topics()->orderBy('position')->get(),
             'page' => $page,
-            'previousPage' => $previousPage,
-            'nextPage' => $nextPage,
-            'totalPages' => $book->pages()->count(),
+            'totalPages' => $totalPages,
+            'pagination' => $pagination,
         ]);
     }
 }
