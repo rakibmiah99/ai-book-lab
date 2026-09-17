@@ -2,10 +2,12 @@
 
 namespace App\Console\Commands;
 
+use App\Ai\Agents\BookTableOfContentsAgent;
 use App\Ai\Agents\BookTopicDetailAgent;
 use App\Ai\Agents\BookTopicOrganizerAgent;
 use App\Models\Book;
 use App\Models\BookPage;
+use App\Models\BookTopic;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
@@ -22,11 +24,17 @@ use Throwable;
 class OrganizeBookTopics extends Command
 {
     /**
-     * The number of consecutive book pages sent to the organizer agent per
-     * call, so the prompt stays well within the model's input token limit
-     * regardless of how long the book is.
+     * The number of consecutive book pages sent to an agent per call, so the
+     * prompt stays well within the model's input token limit regardless of
+     * how long the book (or a single topic within it) is.
      */
     protected const PAGES_PER_CHUNK = 10;
+
+    /**
+     * The number of opening pages scanned when looking for the book's own
+     * printed table of contents.
+     */
+    protected const TOC_SCAN_PAGE_LIMIT = 20;
 
     /**
      * Execute the console command.
@@ -52,40 +60,17 @@ class OrganizeBookTopics extends Command
             return self::SUCCESS;
         }
 
-        $organizedThroughPage = $book->topics_organized_through_page ?? 0;
-
-        $remainingPages = $pages->where('page_number', '>', $organizedThroughPage)->values();
-
-        if ($remainingPages->isEmpty()) {
-            $this->info("Book [{$book->id}] has already been organized into topics.");
-
-            return self::SUCCESS;
-        }
-
-        $pagesByNumber = $pages->keyBy('page_number');
-        $position = ((int) $book->topics()->max('position')) + 1;
-
         try {
-            foreach ($remainingPages->chunk(self::PAGES_PER_CHUNK) as $chunk) {
-                /** @var StructuredAgentResponse $response */
-                $response = (new BookTopicOrganizerAgent)->prompt(
-                    $this->transcriptPrompt($chunk),
-                );
+            if (! $book->topics()->exists()) {
+                $this->createTopicsFromTableOfContents($book, $pages);
+            }
 
-                $chunkTopics = [];
+            $book->refresh();
 
-                foreach ($response['topics'] as $topicStructure) {
-                    $chunkTopics[] = $this->detailTopic($pagesByNumber, [
-                        ...$topicStructure,
-                        'position' => $position++,
-                    ]);
-                }
-
-                $lastPageNumber = $chunk->max('page_number');
-
-                $this->storeChunk($book, $pagesByNumber, $chunkTopics, $lastPageNumber);
-
-                $this->info("Book [{$book->id}]: organized through page {$lastPageNumber} — found ".count($chunkTopics).' topic(s) in this chunk.');
+            if ($book->topics()->exists() && is_null($book->topics_organized_through_page)) {
+                $this->generateDetailsForTopics($book);
+            } else {
+                $this->organizeWithoutTableOfContents($book, $pages);
             }
         } catch (Throwable $e) {
             $this->error("Failed to organize topics for book [{$book->id}]: {$e->getMessage()}");
@@ -97,6 +82,176 @@ class OrganizeBookTopics extends Command
         $this->info("Book [{$book->id}] organized into topics.");
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Look for the book's own printed table of contents in its opening pages
+     * and, if found, create the book's topics and reference pages from it —
+     * so topics match the book's real structure instead of arbitrary page
+     * chunks. Leaves no topics behind if no table of contents is found, so
+     * the caller can fall back to page-chunk topic discovery.
+     *
+     * @param  Collection<int, BookPage>  $pages
+     */
+    protected function createTopicsFromTableOfContents(Book $book, Collection $pages): void
+    {
+        /** @var StructuredAgentResponse $response */
+        $response = (new BookTableOfContentsAgent)->prompt(
+            $this->transcriptPrompt($pages->take(self::TOC_SCAN_PAGE_LIMIT)),
+        );
+
+        $entries = collect($response['entries'])->sortBy('position')->values();
+
+        if ($entries->isEmpty()) {
+            $this->info("Book [{$book->id}]: no table of contents found; falling back to page-chunk topic discovery.");
+
+            return;
+        }
+
+        $pagesByNumber = $pages->keyBy('page_number');
+        $lastPageNumber = $pagesByNumber->keys()->max();
+
+        DB::transaction(function () use ($book, $entries, $pagesByNumber, $lastPageNumber) {
+            foreach ($entries as $index => $entry) {
+                $startPage = $entry['page_number'];
+                $nextEntry = $entries->get($index + 1);
+                $endPage = $nextEntry ? $nextEntry['page_number'] - 1 : $lastPageNumber;
+
+                $bookTopic = $book->topics()->create([
+                    'name' => $entry['name'],
+                    'slug' => Str::slug($entry['name']).'-'.$entry['position'],
+                    'position' => $entry['position'],
+                ]);
+
+                $pagesByNumber
+                    ->filter(fn (BookPage $page, int $pageNumber) => $pageNumber >= $startPage && $pageNumber <= $endPage)
+                    ->each(fn (BookPage $page) => $bookTopic->refPages()->create(['book_page_id' => $page->id]));
+            }
+        });
+
+        $this->info("Book [{$book->id}]: created ".$entries->count().' topic(s) from the table of contents.');
+    }
+
+    /**
+     * Write the full, unabridged content for every topic that doesn't have
+     * it yet, reading each topic's own reference pages (as mapped from the
+     * table of contents). Skips topics that already have details, so a
+     * re-run after a failure only pays for the topics still missing content.
+     */
+    protected function generateDetailsForTopics(Book $book): void
+    {
+        $topics = $book->topics()->orderBy('position')->get();
+
+        foreach ($topics as $topic) {
+            if ($topic->details()->exists()) {
+                continue;
+            }
+
+            $topicPages = $topic->refPages()->with('page')->get()
+                ->pluck('page')
+                ->filter()
+                ->sortBy('page_number')
+                ->values();
+
+            if ($topicPages->isEmpty()) {
+                Log::channel('ai_provider')->warning('Topic has no matching pages to detail; skipping content generation.', [
+                    'book_topic_id' => $topic->id,
+                    'topic' => $topic->name,
+                ]);
+
+                continue;
+            }
+
+            $this->detailAndStoreTopic($topic, $topicPages);
+
+            $this->info("Book [{$book->id}]: wrote full content for topic \"{$topic->name}\" (".$topicPages->count().' page(s)).');
+        }
+    }
+
+    /**
+     * Write a single topic's full detail content and important notes. The
+     * topic's own pages are further split into fixed-size chunks (see
+     * {@see self::PAGES_PER_CHUNK}) so a long chapter's transcript never
+     * overflows a single call's input or output token limit — every chunk's
+     * details are appended with a continuing `position`, so nothing is lost
+     * or shortened no matter how long the topic is.
+     *
+     * @param  Collection<int, BookPage>  $topicPages
+     */
+    protected function detailAndStoreTopic(BookTopic $topic, Collection $topicPages): void
+    {
+        $details = [];
+        $importantNotes = [];
+        $position = 1;
+
+        foreach ($topicPages->chunk(self::PAGES_PER_CHUNK) as $chunk) {
+            /** @var StructuredAgentResponse $response */
+            $response = (new BookTopicDetailAgent)->prompt(
+                $this->topicTranscriptPrompt($topic->name, $chunk),
+            );
+
+            foreach ($response['details'] as $detail) {
+                $details[] = ['content' => $detail['content'], 'position' => $position++];
+            }
+
+            foreach ($response['important_notes'] as $note) {
+                $importantNotes[] = $note;
+            }
+        }
+
+        DB::transaction(function () use ($topic, $details, $importantNotes) {
+            foreach ($details as $detail) {
+                $topic->details()->create($detail);
+            }
+
+            foreach ($importantNotes as $note) {
+                $topic->importantNotes()->create($note);
+            }
+        });
+    }
+
+    /**
+     * Fall back to discovering topics directly from fixed-size page chunks,
+     * for books with no printed table of contents. Resumable via the book's
+     * `topics_organized_through_page` pointer, which this path is the only
+     * one to ever set.
+     *
+     * @param  Collection<int, BookPage>  $pages
+     */
+    protected function organizeWithoutTableOfContents(Book $book, Collection $pages): void
+    {
+        $organizedThroughPage = $book->topics_organized_through_page ?? 0;
+
+        $remainingPages = $pages->where('page_number', '>', $organizedThroughPage)->values();
+
+        if ($remainingPages->isEmpty()) {
+            return;
+        }
+
+        $pagesByNumber = $pages->keyBy('page_number');
+        $position = ((int) $book->topics()->max('position')) + 1;
+
+        foreach ($remainingPages->chunk(self::PAGES_PER_CHUNK) as $chunk) {
+            /** @var StructuredAgentResponse $response */
+            $response = (new BookTopicOrganizerAgent)->prompt(
+                $this->transcriptPrompt($chunk),
+            );
+
+            $chunkTopics = [];
+
+            foreach ($response['topics'] as $topicStructure) {
+                $chunkTopics[] = $this->detailTopic($pagesByNumber, [
+                    ...$topicStructure,
+                    'position' => $position++,
+                ]);
+            }
+
+            $lastPageNumber = $chunk->max('page_number');
+
+            $this->storeChunk($book, $pagesByNumber, $chunkTopics, $lastPageNumber);
+
+            $this->info("Book [{$book->id}]: organized through page {$lastPageNumber} — found ".count($chunkTopics).' topic(s) in this chunk.');
+        }
     }
 
     /**

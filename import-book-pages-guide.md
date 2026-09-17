@@ -108,4 +108,4 @@ php artisan app:organize-book-topics {book_id}
   `config/services.php`).
 
 
-`php artisan app:import-book-pages book-1.pdf "গল্পে আঁকা সীরাত হে মুহাম্মদ" --writer="ইয়াহইয়া ইউসুফ নদভী"`
+`php artisan app:import-book-pages book-3.pdf "জীবন_গড়ার_গল্প" --writer="মুফতী সুহাইল আবদুল কাইয়ুম"`

@@ -28,9 +28,23 @@
 
             <div class="card mb-4">
                 <div class="card-body">
-                    @foreach ($topic->details as $detail)
-                        <div class="reading-text {{ ! $loop->last ? 'mb-4' : '' }}">{{ $detail->content }}</div>
+                    @foreach($topic->refPages as $refPage)
+                        <div class="d-flex align-items-center my-4">
+                            <hr class="flex-grow-1">
+                            <span class="px-3 text-muted">
+                                <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        data-bs-toggle="modal" data-bs-target="#refPageModal{{ $refPage->page->id }}">
+                                Page {{ $refPage->page->page_number }}
+                            </button>
+                            </span>
+                            <hr class="flex-grow-1">
+                        </div>
+                        <div class="reading-text">{{ $refPage?->page?->ai_ocr_content ?? "" }}</div>
                     @endforeach
+
+                    {{--@foreach ($topic->details as $detail)
+                        <div class="reading-text {{ ! $loop->last ? 'mb-4' : '' }}">{{ $detail->content }}</div>
+                    @endforeach--}}
                 </div>
             </div>
 
@@ -91,11 +105,6 @@
                                         </div>
                                         <p class="text-muted small">Click the image to zoom in/out.</p>
                                     @endif
-
-                                    <h6 class="text-uppercase text-muted small mt-3">OCR content</h6>
-                                    <div class="reading-text">
-                                        {{ $refBookPage->ai_ocr_content ?: "This page hasn't been OCR'd yet." }}
-                                    </div>
                                 </div>
                             </div>
                         </div>
